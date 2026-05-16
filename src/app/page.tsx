@@ -1,528 +1,277 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { QLIST, QBY, TOTAL_QUESTIONS, type FlatQ } from "@/lib/schema";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { getLabels, updateLabelStatus, deleteLabel, type SavedLabel } from "@/lib/store";
+import { SidebarLayout } from "@/components/SidebarLayout";
 
-// ========== OPERATORS ==========
-const OPS: Record<string, [string, string][]> = {
-  num: [["=", "equals"], ["!=", "not equal"], [">", "greater than"], ["<", "less than"], [">=", "at least"], ["<=", "at most"], ["between", "between"], ["not_between", "not between"]],
-  date: [["=", "on"], ["<", "before"], [">", "after"], ["between", "between"], ["last_n_days", "in last N days"]],
-  yn: [["=", "is"]],
-  select: [["in", "is any of"], ["not_in", "is none of"], ["=", "equals"]],
-  multi: [["contains_any", "contains any of"], ["contains_all", "contains all of"], ["contains_none", "contains none of"]],
-  text: [["contains", "contains"], ["equals", "equals"], ["starts", "starts with"], ["empty", "is empty"], ["not_empty", "is not empty"]],
-  mono: [["equals", "equals"], ["contains", "contains"], ["empty", "is empty"], ["not_empty", "is not empty"]],
+const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
+  active: { bg: "#e7f4ee", text: "#137a55", dot: "#137a55" },
+  inactive: { bg: "#f3f3f3", text: "#6b7873", dot: "#9aa49f" },
+  draft: { bg: "#fbf3df", text: "#8e6420", dot: "#b9852b" },
 };
 
-const YN_OPTS = ["Yes", "No"];
-
-// ========== STATE TYPES ==========
-type RuleNode = { id: string; type: "rule"; qkey: string; op: string; value: unknown };
-type GroupNode = { id: string; type: "group"; conj: "and" | "or"; children: (RuleNode | GroupNode)[] };
-type Node = RuleNode | GroupNode;
-
-let _uid = 1;
-const nextId = () => "n" + _uid++;
-
-function newRule(): RuleNode {
-  return { id: nextId(), type: "rule", qkey: "", op: "", value: null };
-}
-
-function defaultOp(q: FlatQ | undefined) {
-  if (!q) return "";
-  return (OPS[q.type] || OPS.text)[0][0];
-}
-
-function defaultValue(q: FlatQ | undefined, op: string) {
-  if (!q) return null;
-  if (q.type === "yn") return "Yes";
-  if (q.type === "select") return (op === "in" || op === "not_in") ? [] : (q.options?.[0] || "");
-  if (q.type === "multi") return [];
-  if (op === "between" || op === "not_between") return ["", ""];
-  if (op === "empty" || op === "not_empty") return null;
-  return "";
-}
-
-function valueComplete(rule: RuleNode): boolean {
-  if (!rule.qkey || !rule.op) return false;
-  if (rule.op === "empty" || rule.op === "not_empty") return true;
-  const q = QBY[rule.qkey];
-  if (!q) return false;
-  const v = rule.value;
-  if (rule.op === "between" || rule.op === "not_between") {
-    return Array.isArray(v) && v[0] !== "" && v[1] !== "" && v[0] != null && v[1] != null;
-  }
-  if (q.type === "select" && (rule.op === "in" || rule.op === "not_in")) return Array.isArray(v) && v.length > 0;
-  if (q.type === "multi") return Array.isArray(v) && v.length > 0;
-  return v != null && v !== "";
-}
-
-function countStats(node: Node): { rules: number; groups: number; qused: number; invalid: number; qkeys: Set<string> } {
-  const acc = { rules: 0, groups: 0, qused: 0, invalid: 0, qkeys: new Set<string>() };
-  function walk(n: Node) {
-    if (n.type === "group") {
-      acc.groups++;
-      n.children.forEach(walk);
-    } else {
-      acc.rules++;
-      if (n.qkey) acc.qkeys.add(n.qkey);
-      if (!n.qkey || !n.op || !valueComplete(n)) acc.invalid++;
-    }
-  }
-  walk(node);
-  acc.qused = acc.qkeys.size;
-  return acc;
-}
-
-function labelOf(key: string) {
-  return key.replace(/_/g, " ").replace(/\b([a-z])/g, (m) => m.toUpperCase())
-    .replace(/\bBn\b/, "(BN)").replace(/\bEn\b/, "(EN)")
-    .replace(/\bNid\b/, "NID").replace(/\bGps\b/, "GPS").replace(/\bHh\b/, "HH").replace(/\bMfs\b/, "MFS");
-}
-
-// ========== CHIP PICKER ==========
-function ChipPicker({ selected, options, onToggle, onClose }: {
-  selected: Set<string>; options: string[]; onToggle: (v: string) => void; onClose: () => void;
-}) {
+export default function ListPage() {
+  const router = useRouter();
+  const [labels, setLabels] = useState<SavedLabel[]>([]);
+  const [filter, setFilter] = useState<"all" | "active" | "inactive">("all");
   const [search, setSearch] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as HTMLElement)) onClose();
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
+    setLabels(getLabels());
+  }, []);
 
-  const filtered = options.filter((o) => o.toLowerCase().includes(search.toLowerCase()));
-
-  return (
-    <div className="picker" ref={ref} onClick={(e) => e.stopPropagation()}>
-      <div className="search-wrap">
-        <input type="text" placeholder="Search options…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
-      </div>
-      {filtered.map((o) => (
-        <div key={o} className={`opt ${selected.has(o) ? "on" : ""}`} onClick={() => onToggle(o)}>
-          <span className="cb">
-            {selected.has(o) && <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12" /></svg>}
-          </span>
-          <span>{o}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ========== VALUE CELL ==========
-function ValueCell({ rule, onChange }: { rule: RuleNode; onChange: (v: unknown) => void }) {
-  const q = rule.qkey ? QBY[rule.qkey] : undefined;
-  const [pickerOpen, setPickerOpen] = useState(false);
-
-  if (!q || !rule.op) return <span className="none">Select a question and operator</span>;
-  if (rule.op === "empty" || rule.op === "not_empty") return <span className="none">No value needed</span>;
-
-  if (q.type === "yn") {
-    return (
-      <select value={String(rule.value ?? "Yes")} onChange={(e) => onChange(e.target.value)}>
-        {YN_OPTS.map((o) => <option key={o} value={o}>{o}</option>)}
-      </select>
-    );
-  }
-
-  if (rule.op === "between" || rule.op === "not_between") {
-    const [a = "", b = ""] = (rule.value as string[]) || ["", ""];
-    const inputType = q.type === "date" ? "date" : "number";
-    return (
-      <>
-        <input type={inputType} value={a} placeholder={q.type === "num" ? "min" : "from"}
-          onChange={(e) => onChange([e.target.value, b])} />
-        <span className="between-sep">to</span>
-        <input type={inputType} value={b} placeholder={q.type === "num" ? "max" : "to"}
-          onChange={(e) => onChange([a, e.target.value])} />
-      </>
-    );
-  }
-
-  if (rule.op === "last_n_days") {
-    return (
-      <>
-        <input type="number" value={String(rule.value ?? "")} placeholder="days"
-          onChange={(e) => onChange(e.target.value)} />
-        <span className="between-sep">days</span>
-      </>
-    );
-  }
-
-  if (q.type === "num") {
-    return <input type="number" value={String(rule.value ?? "")} placeholder="enter number"
-      onChange={(e) => onChange(e.target.value)} />;
-  }
-
-  if (q.type === "date") {
-    return <input type="date" value={String(rule.value ?? "")} onChange={(e) => onChange(e.target.value)} />;
-  }
-
-  if ((q.type === "select" && (rule.op === "in" || rule.op === "not_in")) || q.type === "multi") {
-    const sel = new Set(Array.isArray(rule.value) ? (rule.value as string[]) : []);
-    return (
-      <div className="chips-input" tabIndex={0} onClick={() => setPickerOpen(true)}>
-        {[...sel].map((s) => (
-          <span key={s} className="chip">
-            {s}
-            <button className="x" onClick={(e) => { e.stopPropagation(); const next = new Set(sel); next.delete(s); onChange([...next]); }}>×</button>
-          </span>
-        ))}
-        <button className="add-chip" onClick={(e) => { e.stopPropagation(); setPickerOpen(true); }}>+ ADD OPTION</button>
-        {pickerOpen && (
-          <ChipPicker
-            selected={sel}
-            options={q.options}
-            onToggle={(v) => {
-              const next = new Set(sel);
-              if (next.has(v)) next.delete(v); else next.add(v);
-              onChange([...next]);
-            }}
-            onClose={() => setPickerOpen(false)}
-          />
-        )}
-      </div>
-    );
-  }
-
-  if (q.type === "select" && rule.op === "=") {
-    return (
-      <select value={String(rule.value ?? "")} onChange={(e) => onChange(e.target.value)}>
-        {q.options.map((o) => <option key={o} value={o}>{o}</option>)}
-      </select>
-    );
-  }
-
-  return <input type="text" value={String(rule.value ?? "")} placeholder="enter text"
-    onChange={(e) => onChange(e.target.value)} />;
-}
-
-// ========== RULE COMPONENT ==========
-function RuleRow({ rule, onUpdate, onDelete }: {
-  rule: RuleNode; onUpdate: (r: RuleNode) => void; onDelete: () => void;
-}) {
-  const q = rule.qkey ? QBY[rule.qkey] : undefined;
-  const opsList = q ? (OPS[q.type] || OPS.text) : [];
-
-  const bySec: Record<string, FlatQ[]> = {};
-  QLIST.forEach((qq) => {
-    if (!bySec[qq.sectionEn]) bySec[qq.sectionEn] = [];
-    bySec[qq.sectionEn].push(qq);
+  const filtered = labels.filter((l) => {
+    if (filter === "active" && l.status !== "active") return false;
+    if (filter === "inactive" && l.status !== "inactive") return false;
+    if (search && !l.nameEn.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
   });
 
-  return (
-    <div className="rule-wrap">
-      <span className="connector" />
-      <div className="rule">
-        <div className="qpicker">
-          {q && <span className="qnum">{q.qn}</span>}
-          <select value={rule.qkey} onChange={(e) => {
-            const newQ = QBY[e.target.value];
-            const newOp = defaultOp(newQ);
-            onUpdate({ ...rule, qkey: e.target.value, op: newOp, value: defaultValue(newQ, newOp) });
-          }}>
-            <option value="">— Pick a question —</option>
-            {Object.entries(bySec).map(([sec, qs]) => (
-              <optgroup key={sec} label={sec}>
-                {qs.map((qq) => (
-                  <option key={qq.key} value={qq.key}>Q{qq.qn}. {labelOf(qq.key)}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        </div>
+  const totalPages = Math.max(1, Math.ceil(filtered.length / rowsPerPage));
+  const paged = filtered.slice((page - 1) * rowsPerPage, page * rowsPerPage);
 
-        <select value={rule.op} disabled={!q} onChange={(e) => {
-          const newOp = e.target.value;
-          onUpdate({ ...rule, op: newOp, value: defaultValue(q, newOp) });
-        }}>
-          {!q && <option value="">—</option>}
-          {opsList.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-        </select>
+  const activeCount = labels.filter((l) => l.status === "active").length;
+  const inactiveCount = labels.filter((l) => l.status !== "active").length;
 
-        <div className="val">
-          <ValueCell rule={rule} onChange={(v) => onUpdate({ ...rule, value: v })} />
-        </div>
-
-        <button className="delete" onClick={onDelete} title="Remove">
-          <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M6 6l1 14h10l1-14" /></svg>
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ========== GROUP COMPONENT ==========
-function GroupComp({ group, depth, index, onUpdate, onDelete }: {
-  group: GroupNode; depth: number; index: number;
-  onUpdate: (g: GroupNode) => void; onDelete: (() => void) | null;
-}) {
-  const isRoot = depth === 0;
-  const ruleCount = group.children.length;
-
-  const updateChild = (i: number, node: Node) => {
-    const next = [...group.children];
-    next[i] = node;
-    onUpdate({ ...group, children: next });
+  const handleStatusToggle = (id: string, current: string) => {
+    const newStatus = current === "active" ? "inactive" : "active";
+    updateLabelStatus(id, newStatus as SavedLabel["status"]);
+    setLabels(getLabels());
+    setOpenMenu(null);
   };
 
-  const removeChild = (i: number) => {
-    onUpdate({ ...group, children: group.children.filter((_, idx) => idx !== i) });
-  };
-
-  return (
-    <div className={`group ${depth > 0 ? "nested" : ""}`}>
-      <header className="group-bar">
-        <div className="group-name">
-          <span>{isRoot ? "Root group" : "Sub-group"}</span>
-          <span className="gnum">G{index + 1}</span>
-        </div>
-        <div className="conj">
-          <button className={group.conj === "and" ? "on" : ""} onClick={() => onUpdate({ ...group, conj: "and" })}>AND</button>
-          <button className={group.conj === "or" ? "on" : ""} onClick={() => onUpdate({ ...group, conj: "or" })}>OR</button>
-        </div>
-        <div className="spacer" />
-        <span className="count"><b>{ruleCount}</b> rule{ruleCount === 1 ? "" : "s"}</span>
-        {onDelete && (
-          <button className="iconbtn danger" onClick={onDelete} title="Delete group">
-            <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14h10l1-14" /></svg>
-          </button>
-        )}
-      </header>
-
-      <div className="rules">
-        {group.children.length === 0 ? (
-          <div style={{ color: "var(--ink-4)", fontSize: "12.5px", padding: "4px 6px", fontStyle: "italic" }}>
-            This group has no rules yet — add one below
-          </div>
-        ) : (
-          group.children.map((child, i) =>
-            child.type === "rule" ? (
-              <RuleRow key={child.id} rule={child} onUpdate={(r) => updateChild(i, r)} onDelete={() => removeChild(i)} />
-            ) : (
-              <GroupComp key={child.id} group={child} depth={depth + 1} index={i}
-                onUpdate={(g) => updateChild(i, g)} onDelete={() => removeChild(i)} />
-            )
-          )
-        )}
-      </div>
-
-      <div className="group-foot">
-        <button className="ghost-btn" onClick={() => onUpdate({ ...group, children: [...group.children, newRule()] })}>
-          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg> Add rule
-        </button>
-        <button className="ghost-btn" onClick={() => {
-          const ng: GroupNode = { id: nextId(), type: "group", conj: "and", children: [newRule()] };
-          onUpdate({ ...group, children: [...group.children, ng] });
-        }}>
-          <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M9 12h6M12 9v6" /></svg> Add sub-group
-        </button>
-        <div className="spacer" />
-        <span className="foot-hint">
-          Conditions inside this group are joined with{" "}
-          <b style={{ color: "var(--m-2)", fontFamily: "'JetBrains Mono', monospace" }}>{group.conj.toUpperCase()}</b>
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ========== PREVIEW ==========
-function describeNode(node: Node): string {
-  if (node.type === "rule") {
-    const q = QBY[node.qkey];
-    if (!q) return '<span style="color:var(--ink-4)">[incomplete rule]</span>';
-    const ops = OPS[q.type] || OPS.text;
-    const opLabel = ops.find(([v]) => v === node.op)?.[1] || node.op;
-    let vHtml = "";
-    const v = node.value;
-    if (node.op === "empty" || node.op === "not_empty") {
-      vHtml = "";
-    } else if (Array.isArray(v)) {
-      if (node.op === "between" || node.op === "not_between") {
-        vHtml = `<span class="vv">${v[0] || "?"}</span> – <span class="vv">${v[1] || "?"}</span>`;
-      } else {
-        vHtml = v.length ? v.map((x: string) => `<span class="vv">${x}</span>`).join(" ") : '<span class="vv">?</span>';
-      }
-    } else {
-      vHtml = `<span class="vv">${v || "?"}</span>`;
+  const handleDelete = (id: string) => {
+    if (confirm("Delete this label?")) {
+      deleteLabel(id);
+      setLabels(getLabels());
+      setOpenMenu(null);
     }
-    return `<span class="qref">Q${q.qn}. ${labelOf(q.key)}</span> <span class="op">${opLabel}</span> ${vHtml}`;
-  }
-
-  if (!node.children.length) return '<span style="color:var(--ink-4)">[empty group]</span>';
-  const parts = node.children.map((c) => describeNode(c));
-  const joiner = `<span class="conj-word">${node.conj.toUpperCase()}</span>`;
-  return `<span class="paren">(</span> ${parts.join(" " + joiner + " ")} <span class="paren">)</span>`;
-}
-
-// ========== MAIN PAGE ==========
-export default function Home() {
-  const [labelType, setLabelType] = useState<"selection" | "preference">("selection");
-  const [nameEn, setNameEn] = useState("");
-  const [nameBn, setNameBn] = useState("");
-  const [root, setRoot] = useState<GroupNode>({
-    id: nextId(), type: "group", conj: "and",
-    children: [newRule()],
-  });
-
-  const stats = countStats(root);
-  const previewHtml = stats.rules === 0
-    ? '<div class="empty">No conditions yet. Use the query builder above to add your first rule.</div>'
-    : describeNode(root);
-
-  const validationText = stats.rules === 0
-    ? "No rules yet"
-    : stats.invalid > 0
-      ? `${stats.invalid} incomplete rule${stats.invalid === 1 ? "" : "s"}`
-      : "All rules valid ✓";
-  const validationColor = stats.rules === 0 ? "var(--ink-4)" : stats.invalid > 0 ? "var(--danger)" : "var(--accent-2)";
-
-  useEffect(() => {
-    document.body.className = labelType === "preference" ? "mode-preference" : "mode-selection";
-  }, [labelType]);
+  };
 
   return (
-    <>
-      {/* Top Bar */}
-      <header className="topbar">
-        <div className="brand">
-          <div className="dot" />
-          <div className="bname">EARN<span>·</span>EMS</div>
-        </div>
-        <nav className="crumbs">
-          <span>Survey</span><span className="sep">/</span>
-          <span>Labels</span><span className="sep">/</span>
-          <span className="cur">New Label</span>
-        </nav>
-        <div className="spacer" />
-        <button className="icon-btn" title="Help">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-.7.5-1.5 1-1.5 2" /><path d="M12 17h.01" /></svg>
-        </button>
-        <div className="avatar">RA</div>
-      </header>
-
+    <SidebarLayout>
       <main className="page">
         {/* Page Header */}
-        <div className="page-head">
-          <div>
-            <div className="crumb-label">EARN·EMS · LABEL · NEW</div>
-            <h1>Create a new <span style={{ color: "var(--m-2)" }}>{labelType === "preference" ? "Preference" : "Selection"}</span> Label</h1>
-            <div className="lede">Build rules from any combination of {TOTAL_QUESTIONS} survey questions · use groups and AND/OR to compose conditions</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "var(--line-2)", display: "grid", placeItems: "center", color: "var(--ink-3)" }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </div>
+            <h1 style={{ margin: 0, fontSize: 20 }}>Beneficiary Level Configuration</h1>
           </div>
-          <div className="head-actions">
-            <button className="btn ghost">Cancel</button>
-            <button className="btn">Save as draft <span className="k">⌘S</span></button>
-            <button className="btn primary" onClick={() => {
-              const payload = { nameEn, nameBn, type: labelType, query: root };
-              console.log("LABEL_SAVED", payload);
-              alert("Label saved (see JSON in console)\n\n" + (nameEn || nameBn || "(no name set)"));
-            }}>
-              <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg> Save Label <span className="k">⌘↵</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button className="btn" style={{ gap: 6 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
+              </svg>
+              Export
+            </button>
+            <button className="btn primary" style={{ background: "#f0a825", borderColor: "#f0a825", fontWeight: 700, fontSize: 14, height: 40, padding: "0 20px" }}
+              onClick={() => router.push("/new")}>
+              + Add New Level
             </button>
           </div>
         </div>
 
-        {/* Step 1: Label Identity */}
-        <section className="card">
-          <header className="card-head">
-            <div className="ico">
-              <svg viewBox="0 0 24 24"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" /><circle cx="7" cy="7" r="1.5" /></svg>
+        {/* Filter by status */}
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-body" style={{ padding: "14px 20px" }}>
+            <div style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 600, marginBottom: 10 }}>Filter by status</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {([
+                ["all", `All (${labels.length})`],
+                ["active", `Active (${activeCount})`],
+                ["inactive", `Inactive (${inactiveCount})`],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => { setFilter(key); setPage(1); }}
+                  style={{
+                    height: 32, padding: "0 14px", borderRadius: 999, border: "1px solid",
+                    borderColor: filter === key ? "var(--accent)" : "var(--line)",
+                    background: filter === key ? "var(--accent-soft)" : "#fff",
+                    color: filter === key ? "var(--accent-2)" : "var(--ink-2)",
+                    fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-            <div className="titles">
-              <h2>Label Identity</h2>
-              <div className="sub">Set the English &amp; Bangla names and select the label type</div>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="card">
+          {/* Search bar */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", padding: "12px 20px", borderBottom: "1px solid var(--line-2)", gap: 8 }}>
+            <div style={{ position: "relative" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-4)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}>
+                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input type="text" placeholder="Search..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                style={{ paddingLeft: 32, width: 200, height: 34, fontSize: 13 }} />
             </div>
-            <span className="step">STEP 01</span>
-          </header>
-          <div className="card-body">
-            <div className="field-grid">
-              <div className="field">
-                <label>Name (English) <span className="req">*</span> <span className="tag">nameEn</span></label>
-                <input type="text" placeholder="e.g. NEET youth 18-25" value={nameEn} onChange={(e) => setNameEn(e.target.value)} />
-                <div className="hint">English characters · used in database and reports</div>
-              </div>
-              <div className="field">
-                <label>Name (Bangla) <span className="req">*</span> <span className="tag">nameBn</span></label>
-                <input type="text" className="bn" placeholder="e.g. NEET Yubok 18-25" value={nameBn} onChange={(e) => setNameBn(e.target.value)} />
-                <div className="hint">Bangla characters · shown on forms and dashboards</div>
-              </div>
-              <div className="field">
-                <label>Label Type <span className="req">*</span> <span className="tag">type</span></label>
-                <div className="type-cards">
-                  <label className={`type-card ${labelType === "selection" ? "on" : ""}`} onClick={() => setLabelType("selection")}>
-                    <input type="radio" name="ltype" value="selection" checked={labelType === "selection"} readOnly />
-                    <span className="radio" />
-                    <span className="tcopy">
-                      <b>Selection</b>
-                      <span className="desc">Hard eligibility filter — who qualifies</span>
-                    </span>
-                  </label>
-                  <label className={`type-card ${labelType === "preference" ? "on" : ""}`} onClick={() => setLabelType("preference")}>
-                    <input type="radio" name="ltype" value="preference" checked={labelType === "preference"} readOnly />
-                    <span className="radio" />
-                    <span className="tcopy">
-                      <b>Preference</b>
-                      <span className="desc">Priority / scoring — used for ranking</span>
-                    </span>
-                  </label>
-                </div>
+            <button className="icon-btn" title="Refresh" onClick={() => setLabels(getLabels())}>
+              <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+            </button>
+            <button className="icon-btn" title="Column settings">
+              <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /></svg>
+            </button>
+          </div>
+
+          {/* Table header */}
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--line)" }}>
+                  {["LEVEL NAME ↑ ↓", "AGE RANGE", "EDUCATION", "EXPERIENCE (YEARS)", "BANGLA & ENGLISH", "COMPUTER SKILL", "MINORITY GROUP", "GENDER", "STATUS", "ACTIONS"].map((h) => (
+                    <th key={h} style={{
+                      padding: "10px 16px", textAlign: "left", fontSize: 10, fontWeight: 700,
+                      letterSpacing: ".08em", color: "var(--ink-3)", textTransform: "uppercase",
+                      fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap",
+                    }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {paged.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} style={{ padding: "40px 16px", textAlign: "center", color: "var(--ink-4)" }}>
+                      {labels.length === 0
+                        ? "No labels yet. Click \"+ Add New Level\" to create one."
+                        : "No labels match the current filter."}
+                    </td>
+                  </tr>
+                ) : (
+                  paged.map((label) => {
+                    const sc = STATUS_COLORS[label.status] || STATUS_COLORS.draft;
+                    return (
+                      <tr key={label.id} style={{ borderBottom: "1px solid var(--line-2)" }}>
+                        <td style={{ padding: "12px 16px", fontWeight: 600, color: "var(--ink)" }}>{label.nameEn}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.ageRange}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.education}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.experience}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.banglaEnglish}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.computerSkill}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.minorityGroup}</td>
+                        <td style={{ padding: "12px 16px", color: "var(--ink-2)" }}>{label.summary.gender}</td>
+                        <td style={{ padding: "12px 16px" }}>
+                          <span style={{
+                            display: "inline-flex", alignItems: "center", gap: 6,
+                            padding: "4px 12px", borderRadius: 999,
+                            background: sc.bg, color: sc.text, fontSize: 12, fontWeight: 600,
+                          }}>
+                            <span style={{ width: 6, height: 6, borderRadius: "50%", background: sc.dot }} />
+                            {label.status.charAt(0).toUpperCase() + label.status.slice(1)}
+                          </span>
+                        </td>
+                        <td style={{ padding: "12px 16px", position: "relative" }}>
+                          <button
+                            className="btn ghost"
+                            style={{ fontSize: 12 }}
+                            onClick={() => setOpenMenu(openMenu === label.id ? null : label.id)}
+                          >
+                            Manage ▾
+                          </button>
+                          {openMenu === label.id && (
+                            <div style={{
+                              position: "absolute", right: 16, top: "100%", zIndex: 50,
+                              background: "#fff", border: "1px solid var(--line)",
+                              borderRadius: 9, boxShadow: "0 8px 24px rgba(0,0,0,.10)",
+                              padding: 4, minWidth: 140,
+                            }}>
+                              <button onClick={() => handleStatusToggle(label.id, label.status)} style={{
+                                display: "block", width: "100%", padding: "7px 10px", border: 0,
+                                background: "transparent", borderRadius: 5, fontSize: 13, fontWeight: 500,
+                                color: "var(--ink-2)", cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+                              }}>
+                                {label.status === "active" ? "Deactivate" : "Activate"}
+                              </button>
+                              <hr style={{ border: 0, borderTop: "1px solid var(--line-2)", margin: "4px 2px" }} />
+                              <button onClick={() => handleDelete(label.id)} style={{
+                                display: "block", width: "100%", padding: "7px 10px", border: 0,
+                                background: "transparent", borderRadius: 5, fontSize: 13, fontWeight: 500,
+                                color: "var(--danger)", cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+                              }}>
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "10px 20px", borderTop: "1px solid var(--line-2)", fontSize: 12.5, color: "var(--ink-3)",
+          }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span>Total <b style={{ color: "var(--ink-2)", fontWeight: 600 }}>{filtered.length}</b> records</span>
+              <span style={{ color: "var(--line)" }}>|</span>
+              <span>Showing {Math.min((page - 1) * rowsPerPage + 1, filtered.length)}–{Math.min(page * rowsPerPage, filtered.length)} of {filtered.length} records</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span>Rows:</span>
+              <select value={rowsPerPage} onChange={(e) => { setRowsPerPage(Number(e.target.value)); setPage(1); }}
+                style={{ width: 60, height: 28, fontSize: 12 }}>
+                {[10, 25, 50].map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+              <span>Page:</span>
+              <select value={page} onChange={(e) => setPage(Number(e.target.value))}
+                style={{ width: 50, height: 28, fontSize: 12 }}>
+                {Array.from({ length: totalPages }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}
+              </select>
+              <span>of {totalPages} pages</span>
+              <div style={{ display: "flex", gap: 2 }}>
+                {["«", "‹", "›", "»"].map((sym, i) => {
+                  const target = i === 0 ? 1 : i === 1 ? Math.max(1, page - 1) : i === 2 ? Math.min(totalPages, page + 1) : totalPages;
+                  return (
+                    <button key={sym} onClick={() => setPage(target)}
+                      style={{
+                        width: 28, height: 28, border: "1px solid var(--line)", borderRadius: 6,
+                        background: page === target && (i === 0 || i === 3) ? "var(--accent)" : "#fff",
+                        color: page === target && (i === 0 || i === 3) ? "#fff" : "var(--ink-3)",
+                        cursor: "pointer", fontSize: 13, display: "grid", placeItems: "center", fontFamily: "inherit",
+                      }}>
+                      {sym}
+                    </button>
+                  );
+                })}
+                {Array.from({ length: totalPages }, (_, i) => (
+                  <button key={i} onClick={() => setPage(i + 1)}
+                    style={{
+                      width: 28, height: 28, border: "1px solid",
+                      borderColor: page === i + 1 ? "var(--accent)" : "var(--line)",
+                      borderRadius: 6,
+                      background: page === i + 1 ? "var(--accent)" : "#fff",
+                      color: page === i + 1 ? "#fff" : "var(--ink-3)",
+                      cursor: "pointer", fontSize: 12, fontWeight: 600, display: "grid", placeItems: "center",
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}>
+                    {i + 1}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
-        </section>
-
-        {/* Step 2: Query Builder */}
-        <section className="card">
-          <header className="qb-head">
-            <div className="ico">
-              <svg viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4" /></svg>
-            </div>
-            <div className="titles">
-              <h2>Query Builder <span className="step" style={{ marginLeft: 6 }}>STEP 02</span></h2>
-              <div className="sub">Apply conditions across {TOTAL_QUESTIONS} survey questions · combine with groups and AND/OR</div>
-            </div>
-            <span className="pip"><span className="dot" /> {stats.rules} rules · {stats.groups} groups</span>
-            <div className="qb-actions">
-              <button className="btn ghost" onClick={() => setRoot({ id: nextId(), type: "group", conj: "and", children: [newRule()] })}>
-                <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14h10l1-14" /></svg> Reset
-              </button>
-            </div>
-          </header>
-          <div className="card-body" style={{ background: "#fafbfa" }}>
-            <GroupComp group={root} depth={0} index={0} onUpdate={setRoot} onDelete={null} />
-          </div>
-        </section>
-
-        {/* Preview */}
-        <section className="preview-panel">
-          <header className="preview-head">
-            <span className="lbl">Preview · logical expression</span>
-            <span className="badge">{labelType === "preference" ? "PREFERENCE" : "SELECTION"}</span>
-            <div className="spacer" />
-            <span className="lbl">Est. eligible: <b className="mono" style={{ color: "var(--ink)", fontSize: 13 }}>~1,240</b> people</span>
-          </header>
-          <div className="preview-body" dangerouslySetInnerHTML={{ __html: previewHtml }} />
-        </section>
-
-        {/* Sticky Footer */}
-        <div className="sticky-foot">
-          <span className="stats">Validation: <b style={{ color: validationColor }}>{validationText}</b></span>
-          <span className="stats">·</span>
-          <span className="stats">Questions used: <b>{stats.qused}</b>/{TOTAL_QUESTIONS}</span>
-          <div className="spacer" />
-          <button className="btn ghost">Cancel</button>
-          <button className="btn">Save as draft</button>
-          <button className="btn primary">
-            <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg> Save Label
-          </button>
         </div>
       </main>
-    </>
+    </SidebarLayout>
   );
 }

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Create Label — Query Builder",
+  title: "EARN·EMS — Beneficiary Level Configuration",
   description: "EARN·EMS Survey Label Query Builder",
 };
 
