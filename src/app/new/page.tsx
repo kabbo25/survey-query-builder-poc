@@ -389,6 +389,7 @@ export default function Home() {
   const [labelType, setLabelType] = useState<"selection" | "preference">("selection");
   const [nameEn, setNameEn] = useState("");
   const [nameBn, setNameBn] = useState("");
+  const [nameError, setNameError] = useState(false);
   const [root, setRoot] = useState<GroupNode>({
     id: nextId(), type: "group", conj: "and",
     children: [newRule()],
@@ -445,7 +446,7 @@ export default function Home() {
               router.push("/");
             }}>Save as draft <span className="k">⌘S</span></button>
             <button className="btn primary" onClick={() => {
-              if (!nameEn.trim()) { alert("Name (English) is required"); return; }
+              if (!nameEn.trim()) { setNameError(true); return; }
               saveLabel({ id: crypto.randomUUID(), nameEn, nameBn, type: labelType, status: "active", query: root, createdAt: new Date().toISOString(), summary: extractSummary(root) });
               router.push("/");
             }}>
@@ -470,8 +471,13 @@ export default function Home() {
             <div className="field-grid">
               <div className="field">
                 <label>Name (English) <span className="req">*</span> <span className="tag">nameEn</span></label>
-                <input type="text" placeholder="e.g. NEET youth 18-25" value={nameEn} onChange={(e) => setNameEn(e.target.value)} />
-                <div className="hint">English characters · used in database and reports</div>
+                <input type="text" placeholder="e.g. NEET youth 18-25" value={nameEn}
+                  style={nameError && !nameEn.trim() ? { borderColor: "var(--danger)", boxShadow: "0 0 0 3px var(--danger-soft)" } : undefined}
+                  onChange={(e) => { setNameEn(e.target.value); if (e.target.value.trim()) setNameError(false); }} />
+                {nameError && !nameEn.trim()
+                  ? <div style={{ fontSize: 11.5, color: "var(--danger)", fontWeight: 600 }}>Name (English) is required</div>
+                  : <div className="hint">English characters · used in database and reports</div>
+                }
               </div>
               <div className="field">
                 <label>Name (Bangla) <span className="req">*</span> <span className="tag">nameBn</span></label>
@@ -548,7 +554,7 @@ export default function Home() {
             router.push("/");
           }}>Save as draft</button>
           <button className="btn primary" onClick={() => {
-            if (!nameEn.trim()) { alert("Name (English) is required"); return; }
+            if (!nameEn.trim()) { setNameError(true); return; }
             saveLabel({ id: crypto.randomUUID(), nameEn, nameBn, type: labelType, status: "active", query: root, createdAt: new Date().toISOString(), summary: extractSummary(root) });
             router.push("/");
           }}>
